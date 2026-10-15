@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <title>Commit Garden</title>
+    <meta name="description" content="Turn any GitHub contribution graph into a 3D low-poly isometric garden." />
+    <meta name="theme-color" content="#f5dfc3" />
+    <meta property="og:title" content="Commit Garden" />
+    <meta property="og:description" content="Turn any GitHub contribution graph into a 3D low-poly isometric garden." />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+  </head>
+  <body>
+    <div id="scene" class="scene"></div>
+
+    <header class="topbar" id="topbar" hidden>
+      <button class="brand" id="brand-btn" type="button" title="Plant another garden">
+        <span class="brand-mark" aria-hidden="true">🌱</span>
+        <span class="brand-name">Commit Garden</span>
+      </button>
+      <a class="user-chip" id="user-chip" target="_blank" rel="noopener noreferrer">
+        <img id="user-avatar" alt="" width="28" height="28" />
+        <span id="user-name"></span>
+      </a>
+    </header>
+
+    <aside class="stats collapsed" id="stats" aria-label="Garden statistics" hidden>
+      <button class="stats-head" id="stats-toggle" type="button" aria-expanded="false" aria-controls="stats-body">
+        <span class="rank-emoji" id="rank-emoji" aria-hidden="true"></span>
+        <span class="rank-text">
+          <span class="rank-label">Garden rank</span>
+          <span class="rank-name" id="rank-name"></span>
+        </span>
+        <span class="stats-head-total"><span id="stat-total-mini">0</span> <small>contribs</small></span>
+        <span class="chevron" aria-hidden="true"></span>
+      </button>
+      <div class="stats-body" id="stats-body">
+        <p class="rank-blurb" id="rank-blurb"></p>
+        <div class="rank-progress">
+          <div class="rank-bar"><span id="rank-bar-fill"></span></div>
+          <span class="rank-next" id="rank-next"></span>
+        </div>
+        <dl class="stat-grid">
+          <div class="stat stat-wide">
+            <dt title="Total contributions in the last year">Contributions</dt>
+            <dd id="stat-total">0</dd>
+          </div>
+          <div class="stat">
+            <dt>Longest streak</dt>
+            <dd id="stat-longest">0</dd>
+          </div>
+          <div class="stat">
+            <dt>Current streak</dt>
+            <dd id="stat-current">0</dd>
+          </div>
+          <div class="stat stat-wide">
+            <dt>Best day</dt>
+            <dd id="stat-best">—</dd>
+          </div>
+        </dl>
+        <ul class="legend" aria-label="Legend">
+          <li><i class="swatch l0"></i>Dirt</li>
+          <li><i class="swatch l1"></i>Sprouts</li>
+          <li><i class="swatch l2"></i>Flowers</li>
+          <li><i class="swatch l3"></i>Bushes</li>
+          <li><i class="swatch l4"></i>Trees</li>
+        </ul>
+      </div>
+    </aside>
+
+    <nav class="toolbar" id="toolbar" aria-label="Garden actions" hidden>
+      <button class="tool" id="btn-theme" type="button" aria-pressed="false" title="Toggle day / night">
+        <span class="tool-icon" id="theme-icon" aria-hidden="true">🌙</span>
+        <span class="tool-label" id="theme-label">Night</span>
+      </button>
+      <button class="tool" id="btn-replay" type="button" title="Replay the growth animation">
+        <span class="tool-icon" aria-hidden="true">↻</span>
+        <span class="tool-label">Replay</span>
+      </button>
+      <button class="tool" id="btn-download" type="button" title="Download a PNG screenshot">
+        <span class="tool-icon" aria-hidden="true">⤓</span>
+        <span class="tool-label">PNG</span>
+      </button>
+      <button class="tool" id="btn-copy" type="button" title="Copy a link to this garden">
+        <span class="tool-icon" aria-hidden="true">🔗</span>
+        <span class="tool-label">Copy link</span>
+      </button>
+      <button class="tool tool-accent" id="btn-new" type="button" title="Plant another garden">
+        <span class="tool-icon" aria-hidden="true">🌱</span>
+        <span class="tool-label">New</span>
+      </button>
+    </nav>
+
+    <section class="landing" id="landing" aria-labelledby="landing-title">
+      <div class="landing-card">
+        <div class="landing-logo" aria-hidden="true">🌱</div>
+        <h1 id="landing-title">Commit Garden</h1>
+        <p class="tagline">Grow a tiny 3D garden from any GitHub contribution graph.</p>
+        <form id="grow-form" class="grow-form" novalidate>
+          <label class="field" for="username">
+            <span class="field-prefix" aria-hidden="true">github.com/</span>
+            <input
+              id="username"
+              name="username"
+              type="text"
+              placeholder="GitHub username"
+              aria-label="GitHub username"
+              autocomplete="off"
+              autocapitalize="none"
+              autocorrect="off"
+              spellcheck="false"
+              enterkeyhint="go"
+              maxlength="100"
+            />
+          </label>
+          <button type="submit" id="grow-btn" class="btn-primary">
+            <span class="btn-label">Grow 🌱</span>
+            <span class="spinner" aria-hidden="true"></span>
+          </button>
+        </form>
+        <p class="error" id="error" role="alert" hidden></p>
+        <div class="landing-actions">
+          <button type="button" id="demo-btn" class="btn-ghost">✨ Demo garden</button>
+          <button type="button" id="back-btn" class="btn-ghost" hidden>← Back to garden</button>
+        </div>
+      </div>
+      <p class="landing-foot">
+        Contribution data from
+        <a href="https://github.com/grubersjoe/github-contributions-api" target="_blank" rel="noopener noreferrer">github-contributions-api</a>
+      </p>
+    </section>
+
+    <div class="tooltip" id="tooltip" role="tooltip" hidden>
+      <strong id="tooltip-count"></strong>
+      <span id="tooltip-date"></span>
+    </div>
+    <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>

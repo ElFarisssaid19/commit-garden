@@ -1,0 +1,18 @@
+{
+  "name": "commit-garden",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Turn any GitHub contribution graph into a 3D low-poly isometric garden.",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview --base ./"
+  },
+  "dependencies": {
+    "three": "^0.186.1"
+  },
+  "devDependencies": {
+    "vite": "^8.3.4"
+  }
+}
