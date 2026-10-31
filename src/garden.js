@@ -96,6 +96,10 @@ function easeOutBack(t) {
 }
 const pick = (rand, list) => list[Math.floor(rand() * list.length)];
 const range = (rand, min, max) => min + rand() * (max - min);
+/** Height of a tile's little hop at progress p (0..1) of its grow animation. */
+const hopAt = (p) => (p > 0 && p < 1 ? Math.sin(p * Math.PI) * 0.14 : 0);
+/** Device pixel ratio, capped at 2 to keep the canvas affordable on high-DPI screens. */
+const pixelRatio = () => Math.min(window.devicePixelRatio || 1, 2);
 
 // ---------------------------------------------------------------------------
 // Procedural geometry helpers. Every part is converted to non-indexed geometry
@@ -486,10 +490,21 @@ export class Garden {
    */
   constructor(container) {
     this.container = container;
-    this.reducedMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
+
+    // Ambient motion (auto-rotate, clouds, fireflies, marker pulse) stops with the OS
+    // reduced-motion setting, followed live, or with the "Pause motion" button.
+    const motionQuery = window.matchMedia?.('(prefers-reduced-motion: reduce)');
+    this.reducedMotion = motionQuery?.matches ?? false;
+    motionQuery?.addEventListener('change', (e) => {
+      this.reducedMotion = e.matches;
+    });
+    this.motionPaused = false;
+    this.motionTime = 0; // advances only while ambient motion runs
 
     /** Called with { day, x, y, mode } or null whenever the tooltip should change. */
     this.onTooltip = null;
+    /** Called when the browser drops the WebGL context (three.js restores it by itself). */
+    this.onContextLost = null;
 
     this.themes = { day: themeColors(THEMES.day), night: themeColors(THEMES.night) };
     this.night = 0; // 0 = day, 1 = night (animated)
@@ -501,10 +516,15 @@ export class Garden {
     this.userMovedCamera = false;
     this.lastInteraction = -Infinity;
     this.dragging = false;
+    this.intro = null; // camera fly-in state while it runs
+    this.fitDistance = 0; // camera distance and azimuth chosen by the last fitView()
+    this.fitAzimuth = 0;
 
     this.garden = null; // per-garden objects (rebuilt for every user)
     this.selected = null; // { dayIndex, mode }
     this.lastTooltipKey = '';
+    this.pickPending = false; // a mouse move is waiting to be picked on the next frame
+    this.pointerClient = null; // last mouse position in client px
 
     // Capture mode (see enableCaptureMode): a still, deterministic picture.
     this.frozen = false;
@@ -525,17 +545,22 @@ export class Garden {
   // ---- setup ---------------------------------------------------------------
 
   _initRenderer() {
+    // No preserveDrawingBuffer: toBlob() renders and copies the frame in the same task.
     const renderer = new THREE.WebGLRenderer({
       antialias: true,
-      preserveDrawingBuffer: true, // needed for the PNG download
       powerPreference: 'high-performance',
     });
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    renderer.setPixelRatio(pixelRatio());
     renderer.shadowMap.enabled = true;
     renderer.shadowMap.type = THREE.PCFShadowMap;
+    // Shadows only change while plants grow, the sun moves (day/night) or the garden is rebuilt,
+    // so the shadow map is redrawn on request (see _invalidateShadows) instead of every frame.
+    renderer.shadowMap.autoUpdate = false;
     renderer.toneMapping = THREE.NeutralToneMapping;
     renderer.domElement.setAttribute('aria-label', 'Interactive 3D garden. Drag to rotate, scroll or pinch to zoom.');
-    renderer.domElement.setAttribute('role', 'img');
+    // "application" so screen readers pass the arrow keys through to the day navigation.
+    renderer.domElement.setAttribute('role', 'application');
+    renderer.domElement.tabIndex = -1; // focusable with Tab once a garden is interactive
     this.container.appendChild(renderer.domElement);
     this.renderer = renderer;
     this.timer = new THREE.Timer();
@@ -705,7 +730,29 @@ export class Garden {
     el.addEventListener('pointerleave', (e) => {
       if (e.pointerType === 'mouse' && this.selected?.mode === 'hover') this._select(null);
     });
-    el.addEventListener('webglcontextlost', (e) => e.preventDefault());
+    // Arrow keys walk the selection across the week × weekday grid, like the tooltip on hover.
+    el.addEventListener('keydown', (e) => {
+      const step = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] }[e.key];
+      const g = this.garden;
+      if (!step || !g || !this.interactive) return;
+      e.preventDefault();
+      this._markInteraction();
+      const days = g.data.days;
+      const from = this.selected ? days[this.selected.dayIndex] : null;
+      if (!from) {
+        // First key press starts on the most recent day.
+        this._select({ dayIndex: days.length - 1, mode: 'key' });
+        return;
+      }
+      const week = THREE.MathUtils.clamp(from.week + step[0], 0, g.data.weeks - 1);
+      const weekday = THREE.MathUtils.clamp(from.weekday + step[1], 0, 6);
+      const dayIndex = g.cells[week * 7 + weekday];
+      if (dayIndex >= 0) this._select({ dayIndex, mode: 'key' });
+    });
+    // three.js already calls preventDefault() so the context can be restored; we only tell the
+    // user and redraw the shadow map once it's back.
+    el.addEventListener('webglcontextlost', () => this.onContextLost?.());
+    el.addEventListener('webglcontextrestored', () => this._invalidateShadows());
 
     this.resizeObserver = new ResizeObserver(() => this.resize());
     this.resizeObserver.observe(this.container);
@@ -738,6 +785,7 @@ export class Garden {
       spread,
       pop,
       tiles: null,
+      cells: new Int32Array(data.weeks * 7).fill(-1), // week * 7 + weekday → day index (keyboard navigation)
       batches: [],
       pickables: [],
       fireflies: null,
@@ -773,6 +821,7 @@ export class Garden {
       tiles.y[i] = (rand() - 0.5) * 0.03;
       tiles.start[i] = startOf(day);
       tiles.dayIndex[i] = i;
+      g.cells[day.week * 7 + day.weekday] = i;
       const dirt = new THREE.Color(pick(rand, DIRT));
       tiles.dirt.push(dirt);
       tiles.grass.push(day.level > 0 ? new THREE.Color(GRASS_TILES[day.level]).multiplyScalar(0.94 + rand() * 0.1) : dirt);
@@ -859,7 +908,7 @@ export class Garden {
     this.garden = g;
     this._updateShadowCamera();
     this.fitView();
-    if (intro && !this.reducedMotion) this._startIntro();
+    if (intro && !this._motionStill()) this._startIntro();
     this._markInteraction();
     this.frozenRenders = 0;
   }
@@ -905,11 +954,27 @@ export class Garden {
     return this.nightTarget === 1;
   }
 
-  /** Enables/disables camera controls and picking (off while the landing screen is up). */
+  /** Stops (or restarts) ambient motion: auto-rotation, clouds, fireflies and the marker pulse. */
+  setMotionPaused(paused) {
+    this.motionPaused = paused;
+  }
+
+  /** Enables/disables camera controls, picking and keyboard focus (off while the landing screen is up). */
   setInteractive(on) {
     this.interactive = on;
     this.controls.enabled = on;
+    this.renderer.domElement.tabIndex = on ? 0 : -1;
     if (!on) this._select(null);
+  }
+
+  /** Moves keyboard focus to the garden canvas. */
+  focus() {
+    this.renderer.domElement.focus({ preventScroll: true });
+  }
+
+  /** Sets the canvas's accessible name, e.g. a summary of the current garden. */
+  setLabel(label) {
+    this.renderer.domElement.setAttribute('aria-label', label);
   }
 
   /** Screen-space margins (px) covered by UI, so the garden is framed in the visible area. */
@@ -928,11 +993,16 @@ export class Garden {
   resize() {
     const width = Math.max(1, this.container.clientWidth);
     const height = Math.max(1, this.container.clientHeight);
-    if (width === this.size.width && height === this.size.height) return;
+    // Browser zoom and moving to another screen change the pixel ratio too.
+    const ratio = pixelRatio();
+    if (width === this.size.width && height === this.size.height && ratio === this.renderer.getPixelRatio()) return;
     this.size = { width, height };
+    this.renderer.setPixelRatio(ratio);
     this.renderer.setSize(width, height);
+    this.starMaterial.size = 3.2 * ratio;
     this.camera.aspect = width / height;
     this.frozenRenders = 0; // resizing clears the canvas
+    this._invalidateShadows();
     if (this.garden && !this.userMovedCamera) this.fitView({ keepAzimuth: true });
     else this._applyViewOffset();
   }
@@ -986,13 +1056,18 @@ export class Garden {
 
     if (caption) {
       const scale = src.width / this.size.width;
-      const size = Math.round(15 * scale);
-      ctx.font = `600 ${size}px ui-rounded, "SF Pro Rounded", system-ui, -apple-system, "Segoe UI", sans-serif`;
+      const font = (px) => `600 ${px}px ui-rounded, "SF Pro Rounded", system-ui, -apple-system, "Segoe UI", sans-serif`;
+      // Shrink the caption until it fits between the 20 px margins (phones are narrow). Below
+      // 9 px, fillText's maxWidth squeezes it horizontally instead, so it's never cut off.
+      const maxWidth = src.width - 40 * scale;
+      let size = Math.round(15 * scale);
+      ctx.font = font(size);
+      while (size > 9 * scale && ctx.measureText(caption).width > maxWidth) ctx.font = font(--size);
       ctx.textBaseline = 'bottom';
       ctx.fillStyle = this.isNight ? 'rgba(255,255,255,0.92)' : 'rgba(40,32,24,0.85)';
       ctx.shadowColor = this.isNight ? 'rgba(0,0,0,0.5)' : 'rgba(255,255,255,0.6)';
       ctx.shadowBlur = 6 * scale;
-      ctx.fillText(caption, 20 * scale, src.height - 18 * scale);
+      ctx.fillText(caption, 20 * scale, src.height - 18 * scale, maxWidth);
     }
     return new Promise((resolve, reject) => {
       canvas.toBlob((blob) => (blob ? resolve(blob) : reject(new Error('Could not create PNG'))), 'image/png');
@@ -1122,6 +1197,10 @@ export class Garden {
     const dt = Math.min(rawDt, 0.1); // for physics-ish motion; fades use real time
     const t = this.timer.getElapsed();
     const g = this.garden;
+    // Ambient motion runs on its own clock, so pausing freezes it in place.
+    const still = this._motionStill();
+    if (!still) this.motionTime += dt;
+    const mt = this.motionTime;
 
     // Day / night cross-fade
     if (this.night !== this.nightTarget) {
@@ -1137,16 +1216,17 @@ export class Garden {
         this._updateGrowth(g, Infinity);
         g.growing = false;
       }
+      this._invalidateShadows();
     }
-    if (g?.fireflies) this._updateFireflies(g, t);
-    this._updateClouds(t, dt);
+    if (g?.fireflies) this._updateFireflies(g, t, mt);
+    if (!still) this._updateClouds(mt, dt);
 
-    if (this.marker.visible) this.marker.material.opacity = 0.65 + Math.sin(t * 5) * 0.25;
+    if (this.marker.visible) this.marker.material.opacity = still ? 0.9 : 0.65 + Math.sin(mt * 5) * 0.25;
 
     // Camera: intro fly-in, then idle auto-rotation.
     if (this.intro) this._updateIntro(t);
     const idle = t - this.lastInteraction > IDLE_BEFORE_ROTATE;
-    const rotate = this.interactive ? idle && !this.reducedMotion && !this.intro : !this.reducedMotion;
+    const rotate = !still && (this.interactive ? idle && !this.intro : true);
     if (rotate && !this.controls.autoRotate && this.selected?.mode === 'hover') this._select(null);
     this.controls.autoRotate = rotate;
     this.controls.update(dt);
@@ -1163,6 +1243,16 @@ export class Garden {
 
     this.renderer.render(this.scene, this.camera);
     this._flushFrameWaiters();
+  }
+
+  /** True when ambient motion should stand still (OS reduced-motion setting or the Pause button). */
+  _motionStill() {
+    return this.reducedMotion || this.motionPaused;
+  }
+
+  /** Asks the renderer to redraw the shadow map on the next frame (autoUpdate is off). */
+  _invalidateShadows() {
+    this.renderer.shadowMap.needsUpdate = true;
   }
 
   _flushFrameWaiters() {
@@ -1192,8 +1282,7 @@ export class Garden {
     const tileMesh = tiles.mesh;
     for (let i = 0; i < tiles.x.length; i++) {
       const p = clamp01((local - tiles.start[i]) / HOP_DURATION);
-      const hop = p > 0 && p < 1 ? Math.sin(p * Math.PI) * 0.14 : 0;
-      _m.makeTranslation(tiles.x[i], tiles.y[i] + hop, tiles.z[i]);
+      _m.makeTranslation(tiles.x[i], tiles.y[i] + hopAt(p), tiles.z[i]);
       tileMesh.setMatrixAt(i, _m);
       tileMesh.setColorAt(i, _c.lerpColors(tiles.dirt[i], tiles.grass[i], clamp01(p * 1.5)));
     }
@@ -1205,9 +1294,8 @@ export class Garden {
         const p = clamp01((local - batch.start[i]) / pop);
         const grow = p >= 1 ? 1 : easeOutBack(p);
         const tp = clamp01((local - tiles.start[batch.tile[i]]) / HOP_DURATION);
-        const hop = tp > 0 && tp < 1 ? Math.sin(tp * Math.PI) * 0.14 : 0;
         _v.fromArray(batch.pos, i * 3);
-        _v.y += hop;
+        _v.y += hopAt(tp);
         _q.fromArray(batch.quat, i * 4);
         _s.fromArray(batch.scale, i * 3).multiplyScalar(Math.max(grow, 0));
         _m.compose(_v, _q, _s);
@@ -1217,7 +1305,8 @@ export class Garden {
     }
   }
 
-  _updateFireflies(g, t) {
+  /** `t` drives the grow-in (real time), `mt` the orbit and flicker (stops when motion is paused). */
+  _updateFireflies(g, t, mt) {
     const ff = g.fireflies;
     const visible = this.night > 0.01;
     ff.points.visible = visible;
@@ -1229,11 +1318,11 @@ export class Garden {
     for (let i = 0; i < ff.count; i++) {
       const o = i * 8;
       const p = ff.params;
-      const angle = p[o + 5] + t * p[o + 4];
-      const r = p[o + 3] * (1 + Math.sin(t * 0.7 + p[o + 5]) * 0.25);
-      pos.setXYZ(i, p[o] + Math.cos(angle) * r, p[o + 1] + Math.sin(t * 1.3 + p[o + 5] * 2) * 0.35, p[o + 2] + Math.sin(angle) * r);
+      const angle = p[o + 5] + mt * p[o + 4];
+      const r = p[o + 3] * (1 + Math.sin(mt * 0.7 + p[o + 5]) * 0.25);
+      pos.setXYZ(i, p[o] + Math.cos(angle) * r, p[o + 1] + Math.sin(mt * 1.3 + p[o + 5] * 2) * 0.35, p[o + 2] + Math.sin(angle) * r);
       const grown = clamp01((local - p[o + 7]) / 0.6);
-      const flicker = 0.5 + 0.5 * Math.sin(t * p[o + 6] + p[o + 5]) ** 2;
+      const flicker = 0.5 + 0.5 * Math.sin(mt * p[o + 6] + p[o + 5]) ** 2;
       _c.copy(FIREFLY_COLOR).multiplyScalar(1.6 * flicker * grown * glow);
       col.setXYZ(i, _c.r, _c.g, _c.b);
     }
@@ -1299,6 +1388,8 @@ export class Garden {
     cam.near = Math.max(0.1, -maxZ - 2);
     cam.far = -minZ + 2;
     cam.updateProjectionMatrix();
+    // Called whenever the sun moves (day/night) or a garden is built, so the shadows need a redraw.
+    this._invalidateShadows();
   }
 
   // ---- camera --------------------------------------------------------------

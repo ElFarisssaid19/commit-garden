@@ -13,7 +13,10 @@ export const formatNumber = (n) => numberFormat.format(n);
 const toUtcDate = (iso) => new Date(`${iso}T00:00:00Z`);
 const plural = (n, one, many) => `${formatNumber(n)} ${n === 1 ? one : many}`;
 
-export function contributionsLabel(count) {
+/** How long a fetch runs before the landing screen says the API is just slow. */
+const SLOW_HINT_MS = 4000;
+
+function contributionsLabel(count) {
   return count === 0 ? 'No contributions' : plural(count, 'contribution', 'contributions');
 }
 
@@ -26,6 +29,7 @@ export function createUI() {
     demoBtn: $('demo-btn'),
     backBtn: $('back-btn'),
     error: $('error'),
+    slowHint: $('slow-hint'),
     topbar: $('topbar'),
     brandBtn: $('brand-btn'),
     userChip: $('user-chip'),
@@ -47,6 +51,8 @@ export function createUI() {
     themeBtn: $('btn-theme'),
     themeIcon: $('theme-icon'),
     themeLabel: $('theme-label'),
+    motionBtn: $('btn-motion'),
+    motionIcon: $('motion-icon'),
     replayBtn: $('btn-replay'),
     downloadBtn: $('btn-download'),
     copyBtn: $('btn-copy'),
@@ -54,6 +60,7 @@ export function createUI() {
     tooltip: $('tooltip'),
     tooltipCount: $('tooltip-count'),
     tooltipDate: $('tooltip-date'),
+    dayAnnouncer: $('day-announcer'),
     toast: $('toast'),
     captureOverlay: $('capture-overlay'),
   };
@@ -63,6 +70,7 @@ export function createUI() {
   const finePointer = window.matchMedia('(pointer: fine)');
   const counters = new Map();
   let toastTimer = 0;
+  let slowTimer = 0;
   let tooltipDay = null;
 
   /** Callbacks wired up by main.js. */
@@ -72,6 +80,7 @@ export function createUI() {
     back: () => {},
     newGarden: () => {},
     toggleTheme: () => {},
+    toggleMotion: () => {},
     replay: () => {},
     download: () => {},
     copyLink: () => {},
@@ -87,14 +96,25 @@ export function createUI() {
   el.brandBtn.addEventListener('click', () => handlers.newGarden());
   el.newBtn.addEventListener('click', () => handlers.newGarden());
   el.themeBtn.addEventListener('click', () => handlers.toggleTheme());
+  el.motionBtn.addEventListener('click', () => handlers.toggleMotion());
   el.replayBtn.addEventListener('click', () => handlers.replay());
   el.downloadBtn.addEventListener('click', () => handlers.download());
   el.copyBtn.addEventListener('click', () => handlers.copyLink());
   el.statsToggle.addEventListener('click', () => {
     if (!compactQuery.matches) return;
-    const collapsed = el.stats.classList.toggle('collapsed');
-    el.statsToggle.setAttribute('aria-expanded', String(!collapsed));
+    el.stats.classList.toggle('collapsed');
+    syncStatsToggle();
   });
+
+  /** The stats header only collapses on compact layouts; elsewhere the panel is always open. */
+  function syncStatsToggle() {
+    const compact = compactQuery.matches;
+    el.statsToggle.setAttribute('aria-expanded', String(!compact || !el.stats.classList.contains('collapsed')));
+    if (compact) el.statsToggle.removeAttribute('aria-disabled');
+    else el.statsToggle.setAttribute('aria-disabled', 'true');
+  }
+  compactQuery.addEventListener('change', syncStatsToggle);
+  syncStatsToggle();
 
   function on(name, fn) {
     handlers[name] = fn;
@@ -133,6 +153,11 @@ export function createUI() {
     el.demoBtn.disabled = loading;
     el.input.readOnly = loading;
     el.growBtn.setAttribute('aria-busy', String(loading));
+    // The API sometimes takes several seconds; say so instead of leaving a lone spinner.
+    // The hint is a live region, so it's announced when its text appears.
+    clearTimeout(slowTimer);
+    el.slowHint.textContent = '';
+    if (loading) slowTimer = setTimeout(() => (el.slowHint.textContent = 'Still fetching… the API can be slow.'), SLOW_HINT_MS);
   }
 
   function setInputValue(value) {
@@ -159,6 +184,7 @@ export function createUI() {
 
     if (data.isDemo) {
       el.userChip.removeAttribute('href');
+      el.userChip.removeAttribute('title');
       el.userChip.classList.add('is-demo');
       el.userAvatar.hidden = true;
       el.userName.textContent = '✨ Demo garden';
@@ -226,6 +252,13 @@ export function createUI() {
     document.querySelector('meta[name="theme-color"]')?.setAttribute('content', isNight ? '#262e69' : '#f5dfc3');
   }
 
+  /** The label stays "Pause" (it names the action); aria-pressed and the icon show the state. */
+  function setMotionPaused(paused) {
+    el.motionBtn.setAttribute('aria-pressed', String(paused));
+    el.motionIcon.textContent = paused ? '▶️' : '⏸️'; // emoji presentation, like the other toolbar icons
+    el.motionBtn.title = paused ? 'Resume the garden’s motion' : 'Pause the garden’s motion';
+  }
+
   /** Screen margins covered by the HUD so the 3D view can frame the garden around them. */
   function getSafeInsets() {
     if (isLandingVisible()) return { top: 0, right: 0, bottom: 0, left: 0 };
@@ -252,6 +285,8 @@ export function createUI() {
       tooltipDay = info.day;
       el.tooltipCount.textContent = contributionsLabel(info.day.count);
       el.tooltipDate.textContent = longDate.format(toUtcDate(info.day.date));
+      // Screen readers hear days picked with the keyboard or a tap, not every mouse hover.
+      if (info.mode !== 'hover') el.dayAnnouncer.textContent = `${el.tooltipCount.textContent}, ${el.tooltipDate.textContent}`;
     }
     tip.hidden = false;
     tip.classList.toggle('is-anchored', info.mode !== 'hover');
@@ -370,6 +405,7 @@ export function createUI() {
     showGarden,
     animateStats,
     setNight,
+    setMotionPaused,
     getSafeInsets,
     showTooltip,
     hideTooltip,

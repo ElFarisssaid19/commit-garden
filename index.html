@@ -6,8 +6,17 @@
     <title>Commit Garden</title>
     <meta name="description" content="Turn any GitHub contribution graph into a 3D low-poly isometric garden." />
     <meta name="theme-color" content="#f5dfc3" />
+    <link rel="canonical" href="https://elfarisssaid19.github.io/commit-garden/" />
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://elfarisssaid19.github.io/commit-garden/" />
     <meta property="og:title" content="Commit Garden" />
     <meta property="og:description" content="Turn any GitHub contribution graph into a 3D low-poly isometric garden." />
+    <!-- Social previews need an absolute URL; regenerate the image with `npm run og`. -->
+    <meta property="og:image" content="https://elfarisssaid19.github.io/commit-garden/og.png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content="A low-poly floating island garden grown from a GitHub contribution graph" />
+    <meta name="twitter:card" content="summary_large_image" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
   </head>
   <body>
@@ -73,6 +82,10 @@
         <span class="tool-icon" id="theme-icon" aria-hidden="true">🌙</span>
         <span class="tool-label" id="theme-label">Night</span>
       </button>
+      <button class="tool tool-toggle" id="btn-motion" type="button" aria-pressed="false" title="Pause the garden’s motion">
+        <span class="tool-icon" id="motion-icon" aria-hidden="true">⏸️</span>
+        <span class="tool-label">Pause</span>
+      </button>
       <button class="tool" id="btn-replay" type="button" title="Replay the growth animation">
         <span class="tool-icon" aria-hidden="true">↻</span>
         <span class="tool-label">Replay</span>
@@ -118,6 +131,7 @@
             <span class="spinner" aria-hidden="true"></span>
           </button>
         </form>
+        <p class="slow-hint" id="slow-hint" role="status"></p>
         <p class="error" id="error" role="alert" hidden></p>
         <div class="landing-actions">
           <button type="button" id="demo-btn" class="btn-ghost">✨ Demo garden</button>
@@ -135,6 +149,7 @@
       <span id="tooltip-date"></span>
     </div>
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
+    <p class="visually-hidden" id="day-announcer" aria-live="polite"></p>
     <p class="capture-overlay" id="capture-overlay" hidden></p>
 
     <script type="module" src="/src/main.js"></script>

@@ -12,7 +12,9 @@ import {
 import { createUI, formatNumber } from './ui.js';
 
 const THEME_KEY = 'commit-garden:night';
+const MOTION_KEY = 'commit-garden:paused';
 const CAPTURE_ATTEMPTS = 3;
+const RETRY_DELAY_MS = 1500; // one automatic retry when the API is busy or failing
 
 const ui = createUI();
 const cache = new Map(); // lower-cased username → garden data
@@ -34,19 +36,52 @@ function syncUrl(data, push) {
   window.history[push ? 'pushState' : 'replaceState'](null, '', url);
 }
 
-function readSavedNight() {
+/** Reads an on/off setting; null when it was never saved (or storage is unavailable). */
+function readFlag(key) {
   try {
-    return window.localStorage.getItem(THEME_KEY) === '1';
+    const value = window.localStorage.getItem(key);
+    return value === null ? null : value === '1';
   } catch {
-    return false;
+    return null;
   }
 }
 
-function saveNight(isNight) {
+function saveFlag(key, on) {
   try {
-    window.localStorage.setItem(THEME_KEY, isNight ? '1' : '0');
+    window.localStorage.setItem(key, on ? '1' : '0');
   } catch {
     // Storage can be unavailable (private mode); the toggle still works for this visit.
+  }
+}
+
+/** Resolves after `ms`, or rejects as "aborted" if the signal fires first. */
+function wait(ms, signal) {
+  return new Promise((resolve, reject) => {
+    const cancelled = () => new GardenError('Request cancelled.', 'aborted');
+    if (signal?.aborted) {
+      reject(cancelled());
+      return;
+    }
+    const timer = setTimeout(resolve, ms);
+    signal?.addEventListener(
+      'abort',
+      () => {
+        clearTimeout(timer);
+        reject(cancelled());
+      },
+      { once: true },
+    );
+  });
+}
+
+/** fetchContributions with one automatic retry for rate limits and server errors. */
+async function fetchWithRetry(username, signal) {
+  try {
+    return await fetchContributions(username, { signal });
+  } catch (err) {
+    if (!['rate-limit', 'server'].includes(err?.kind)) throw err;
+    await wait(RETRY_DELAY_MS, signal);
+    return fetchContributions(username, { signal });
   }
 }
 
@@ -66,12 +101,17 @@ function showLanding() {
   document.title = 'Commit Garden';
 }
 
-function backToGarden() {
+/**
+ * `focus` is true when the user acted on the landing screen (form, buttons, Escape): that screen is
+ * now inert, so keyboard focus moves to the garden. URL routing leaves focus alone.
+ */
+function backToGarden({ focus = true } = {}) {
   if (!current) return;
   cancelPendingLoad();
   ui.hideLanding();
   garden.setInsets(ui.getSafeInsets());
   garden.setInteractive(true);
+  if (focus) garden.focus();
   updateTitle(current.data);
 }
 
@@ -79,19 +119,27 @@ function updateTitle(data) {
   document.title = data.isDemo ? 'Demo garden · Commit Garden' : `${data.username} · Commit Garden`;
 }
 
-function showGarden(data) {
+function showGarden(data, { focus = true } = {}) {
   const stats = computeStats(data.days);
+  const rank = getRank(stats.total);
   current = { data, stats };
-  ui.showGarden({ data, stats, rank: getRank(stats.total), growDuration: GROW_DURATION });
+  ui.showGarden({ data, stats, rank, growDuration: GROW_DURATION });
+  // Insets go first: setGarden() frames the new garden (and its intro) around the HUD.
   garden.setInsets(ui.getSafeInsets());
   garden.setInteractive(true);
   garden.setGarden(data);
+  const who = data.isDemo ? 'Demo garden' : `Garden of @${data.username}`;
+  garden.setLabel(
+    `${who}: ${formatNumber(stats.total)} contributions in the last year, rank ${rank.name}. ` +
+      'Use the arrow keys to inspect days, Escape to clear.',
+  );
+  if (focus) garden.focus(); // see backToGarden()
   updateTitle(data);
 }
 
 // ---- loading -------------------------------------------------------------
 
-async function loadUser(input, { push = true } = {}) {
+async function loadUser(input, { push = true, focus = true } = {}) {
   const username = normalizeUsername(input);
   ui.setInputValue(username || String(input ?? '').trim());
   if (!username) {
@@ -108,10 +156,10 @@ async function loadUser(input, { push = true } = {}) {
 
   try {
     const key = username.toLowerCase();
-    const data = cache.get(key) ?? (await fetchContributions(username, { signal: controller.signal }));
+    const data = cache.get(key) ?? (await fetchWithRetry(username, controller.signal));
     if (token !== loadToken) return;
     cache.set(key, data);
-    showGarden(data);
+    showGarden(data, { focus });
     syncUrl(data, push);
   } catch (err) {
     if (token !== loadToken || err?.kind === 'aborted') return;
@@ -124,10 +172,10 @@ async function loadUser(input, { push = true } = {}) {
   }
 }
 
-function loadDemo(seed, { push = true } = {}) {
+function loadDemo(seed, { push = true, focus = true } = {}) {
   cancelPendingLoad();
   const data = Number.isFinite(seed) && seed >= 0 ? generateDemoData(seed) : generateDemoData();
-  showGarden(data);
+  showGarden(data, { focus });
   syncUrl(data, push);
 }
 
@@ -139,13 +187,13 @@ function route() {
   if (user) {
     const cached = cache.get(normalizeUsername(user).toLowerCase());
     if (cached && cached === current?.data) {
-      backToGarden();
+      backToGarden({ focus: false });
       return;
     }
     showLanding();
-    loadUser(user, { push: false });
+    loadUser(user, { push: false, focus: false });
   } else if (demo !== null) {
-    loadDemo(Number.parseInt(demo, 10), { push: false });
+    loadDemo(Number.parseInt(demo, 10), { push: false, focus: false });
   } else {
     cancelPendingLoad();
     showLanding();
@@ -184,7 +232,13 @@ function toggleTheme() {
   const night = !garden.isNight;
   garden.setNight(night);
   ui.setNight(night);
-  saveNight(night);
+  saveFlag(THEME_KEY, night);
+}
+
+function setMotionPaused(paused, { save = true } = {}) {
+  garden.setMotionPaused(paused);
+  ui.setMotionPaused(paused);
+  if (save) saveFlag(MOTION_KEY, paused);
 }
 
 // ---- capture mode ----------------------------------------------------------
@@ -200,7 +254,7 @@ async function loadCaptureData(params) {
     try {
       return await fetchContributions(user);
     } catch (err) {
-      const retryable = ['network', 'timeout', 'server'].includes(err?.kind);
+      const retryable = ['network', 'timeout', 'rate-limit', 'server'].includes(err?.kind);
       if (!retryable || attempt >= CAPTURE_ATTEMPTS) throw err;
       await new Promise((resolve) => setTimeout(resolve, 2000 * attempt));
     }
@@ -254,14 +308,18 @@ function init() {
     return;
   }
 
-  const night = readSavedNight();
+  // With no saved choice, start in the same mode as the operating system.
+  const night = readFlag(THEME_KEY) ?? window.matchMedia('(prefers-color-scheme: dark)').matches;
   garden.setNight(night, { instant: true });
   ui.setNight(night);
+  setMotionPaused(readFlag(MOTION_KEY) ?? false, { save: false });
 
   // A bare island slowly turns behind the landing screen.
   garden.setGarden(generateEmptyGarden(), { animate: false, intro: false });
 
   garden.onTooltip = (info) => ui.showTooltip(info);
+  garden.onContextLost = () =>
+    ui.toast('The 3D view was interrupted by your graphics driver. It should come back by itself; reload if it doesn’t.');
 
   ui.on('submit', (value) => loadUser(value));
   ui.on('demo', () => loadDemo());
@@ -271,6 +329,7 @@ function init() {
     showLanding();
   });
   ui.on('toggleTheme', toggleTheme);
+  ui.on('toggleMotion', () => setMotionPaused(!garden.motionPaused));
   ui.on('replay', () => {
     if (!current) return;
     garden.replay();
