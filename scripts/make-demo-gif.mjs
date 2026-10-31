@@ -6,6 +6,12 @@
 // Needs a local Chrome/Chromium (set CHROME_PATH if it isn't found) and ffmpeg.
 // The page runs on a virtual clock that advances exactly 1/FPS per captured frame,
 // so the GIF is smooth even when (software) rendering is much slower than real time.
+//
+// With --og it instead saves the social preview image, public/og.png (1200×630), from
+// capture mode (?demo=<seed>&capture=1). No ffmpeg or network needed:
+//
+//   npm run og
+//   OG_SEED=36 npm run og       (try another demo seed)
 
 import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
@@ -19,6 +25,13 @@ import { preview } from 'vite';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const OUTPUT = path.join(ROOT, 'docs', 'demo.gif');
 const USER = process.env.DEMO_USER || 'torvalds';
+
+const OG_MODE = process.argv.includes('--og');
+const OG_OUTPUT = path.join(ROOT, 'public', 'og.png');
+// Seed 10 is the densest of demo seeds 1–60 (Forest rank, ~80% of days active, evenly spread).
+const OG_SEED = process.env.OG_SEED || '10';
+const OG_QUERY = `?demo=${encodeURIComponent(OG_SEED)}&capture=1`;
+const OG_VIEWPORT = { width: 1200, height: 630 };
 
 const FPS = 15;
 const SECONDS = 6;
@@ -87,12 +100,34 @@ function installVirtualClock() {
   };
 }
 
-async function recordFrames(url, framesDir) {
-  const browser = await puppeteer.launch({
+function launchBrowser() {
+  return puppeteer.launch({
     executablePath: findChrome(),
     headless: true,
     args: ['--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--ignore-gpu-blocklist', '--hide-scrollbars'],
   });
+}
+
+/** Screenshots capture mode once the page reports __GARDEN_READY__. */
+async function captureOg(url) {
+  const browser = await launchBrowser();
+  try {
+    const page = await browser.newPage();
+    page.on('pageerror', (err) => console.error('page error:', err.message));
+    await page.setViewport({ ...OG_VIEWPORT, deviceScaleFactor: 1 });
+    await page.goto(url, { waitUntil: 'networkidle0' });
+    await page.waitForFunction(() => window.__GARDEN_READY__ || window.__GARDEN_ERROR__, { timeout: 60000 });
+    const error = await page.evaluate(() => window.__GARDEN_ERROR__);
+    if (error) throw new Error(`Capture mode failed: ${error}`);
+    await fs.mkdir(path.dirname(OG_OUTPUT), { recursive: true });
+    await page.screenshot({ path: OG_OUTPUT });
+  } finally {
+    await browser.close();
+  }
+}
+
+async function recordFrames(url, framesDir) {
+  const browser = await launchBrowser();
   try {
     const page = await browser.newPage();
     page.on('pageerror', (err) => console.error('page error:', err.message));
@@ -142,8 +177,22 @@ function encodeGif(framesDir, target, { colors, dither }) {
 
 async function main() {
   if (!existsSync(path.join(ROOT, 'dist', 'index.html'))) {
-    throw new Error('No build found in dist/. Run `npm run build` first (or use `npm run demo:gif`).');
+    throw new Error('No build found in dist/. Run `npm run build` first (or use `npm run demo:gif` / `npm run og`).');
   }
+
+  if (OG_MODE) {
+    const server = await preview({ root: ROOT, base: './', logLevel: 'error', preview: { port: 4180, open: false } });
+    try {
+      const url = new URL(OG_QUERY, server.resolvedUrls.local[0]).href;
+      console.log(`Capturing ${url}`);
+      await captureOg(url);
+      console.log(`Saved ${path.relative(ROOT, OG_OUTPUT)}`);
+    } finally {
+      await server.close();
+    }
+    return;
+  }
+
   checkFfmpeg();
 
   const framesDir = await fs.mkdtemp(path.join(os.tmpdir(), 'commit-garden-gif-'));

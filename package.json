@@ -3,12 +3,25 @@
   "private": true,
   "version": "1.0.0",
   "description": "Turn any GitHub contribution graph into a 3D low-poly isometric garden.",
+  "keywords": ["github", "contributions", "three.js", "3d", "visualization", "low-poly"],
+  "homepage": "https://elfarisssaid19.github.io/commit-garden/",
+  "bugs": "https://github.com/ElFarisssaid19/commit-garden/issues",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ElFarisssaid19/commit-garden.git"
+  },
+  "license": "MIT",
+  "author": "Said El Fariss",
   "type": "module",
+  "engines": {
+    "node": ">=22.12"
+  },
   "scripts": {
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview --base ./",
-    "demo:gif": "npm run build && node scripts/make-demo-gif.mjs"
+    "demo:gif": "npm run build && node scripts/make-demo-gif.mjs",
+    "og": "npm run build && node scripts/make-demo-gif.mjs --og"
   },
   "dependencies": {
     "three": "^0.186.1"
