@@ -12,6 +12,7 @@ import {
 import { createUI, formatNumber } from './ui.js';
 
 const THEME_KEY = 'commit-garden:night';
+const CAPTURE_ATTEMPTS = 3;
 
 const ui = createUI();
 const cache = new Map(); // lower-cased username → garden data
@@ -186,14 +187,70 @@ function toggleTheme() {
   saveNight(night);
 }
 
+// ---- capture mode ----------------------------------------------------------
+// ?user=<name>&capture=1 renders one still, deterministic garden with a caption,
+// then sets window.__GARDEN_READY__ (or __GARDEN_ERROR__) for screenshot tools.
+
+async function loadCaptureData(params) {
+  const user = normalizeUsername(params.get('user'));
+  const demo = params.get('demo');
+  if (!user && demo !== null) return generateDemoData(Number.parseInt(demo, 10) || 0);
+  if (!user) throw new GardenError('Capture mode needs a ?user=<name> parameter.', 'invalid');
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await fetchContributions(user);
+    } catch (err) {
+      const retryable = ['network', 'timeout', 'server'].includes(err?.kind);
+      if (!retryable || attempt >= CAPTURE_ATTEMPTS) throw err;
+      await new Promise((resolve) => setTimeout(resolve, 2000 * attempt));
+    }
+  }
+}
+
+async function startCapture(params) {
+  ui.enterCaptureMode();
+  ui.setNight(false);
+  garden.enableCaptureMode();
+  try {
+    const data = await loadCaptureData(params);
+    const { total } = computeStats(data.days);
+    const rank = getRank(total);
+    const who = data.isDemo ? 'Demo garden' : data.username;
+    const contributions = `${formatNumber(total)} ${total === 1 ? 'contribution' : 'contributions'}`;
+    ui.showCaptureOverlay(`🌱 ${who} · ${contributions} · ${rank.emoji} ${rank.name}`);
+    garden.setInsets(ui.getCaptureInsets());
+    garden.setGarden(data);
+    updateTitle(data);
+    await document.fonts?.ready;
+    // One frame renders the scene (and its shadow map), the next one confirms it's on screen.
+    await garden.nextFrame();
+    await garden.nextFrame();
+    window.__GARDEN_READY__ = true;
+  } catch (err) {
+    const message = err?.message || String(err);
+    if (!(err instanceof GardenError)) console.error(err);
+    ui.showCaptureOverlay(`⚠️ ${message}`);
+    window.__GARDEN_ERROR__ = message;
+  }
+}
+
 // ---- boot ----------------------------------------------------------------
 
 function init() {
+  const params = new URLSearchParams(window.location.search);
+  const capture = params.get('capture') === '1';
+
   try {
     garden = new Garden(document.getElementById('scene'));
   } catch (err) {
     console.error(err);
     ui.showFatal('Your browser can’t display 3D graphics (WebGL is unavailable), so the garden can’t grow here. Try another browser or device.');
+    if (capture) window.__GARDEN_ERROR__ = 'WebGL is unavailable';
+    return;
+  }
+
+  if (capture) {
+    startCapture(params);
     return;
   }
 

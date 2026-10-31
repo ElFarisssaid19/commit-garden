@@ -29,6 +29,8 @@ const POLAR = THREE.MathUtils.degToRad(57);
 const AZIMUTH_MIN = THREE.MathUtils.degToRad(20);
 const AZIMUTH_MAX = THREE.MathUtils.degToRad(68);
 const VIEW_PADDING = 18; // px kept clear around the garden when framing
+const CAPTURE_AZIMUTH = THREE.MathUtils.degToRad(24); // fixed angle for capture mode
+const CAPTURE_PADDING = 28;
 
 const DIRT = ['#8b5d3b', '#7f5434', '#94643f', '#86593a', '#9a6a44'];
 const GRASS_TILES = [null, '#9cbf5b', '#84b04e', '#6d9e45', '#5a8f3e'];
@@ -504,6 +506,13 @@ export class Garden {
     this.selected = null; // { dayIndex, mode }
     this.lastTooltipKey = '';
 
+    // Capture mode (see enableCaptureMode): a still, deterministic picture.
+    this.frozen = false;
+    this.fixedAzimuth = null;
+    this.viewPadding = VIEW_PADDING;
+    this.frozenRenders = 0;
+    this.frameWaiters = [];
+
     this._initRenderer();
     this._initScene();
     this._initControls();
@@ -621,6 +630,7 @@ export class Garden {
       this.clouds.push(mesh);
       scene.add(mesh);
     }
+    this._updateClouds(0, 0);
 
     // Hover / selection marker: a square ring floating over a tile.
     this.marker = new THREE.Mesh(
@@ -705,6 +715,10 @@ export class Garden {
 
   /** Builds a new garden for `data` (see data.js) and starts the grow animation. */
   setGarden(data, { animate = true, intro = true } = {}) {
+    if (this.frozen) {
+      animate = false;
+      intro = false;
+    }
     this._clearGarden();
     const rand = createRandom(data.seed);
     const days = data.days;
@@ -847,6 +861,27 @@ export class Garden {
     this.fitView();
     if (intro && !this.reducedMotion) this._startIntro();
     this._markInteraction();
+    this.frozenRenders = 0;
+  }
+
+  /**
+   * Capture mode for automated screenshots: day lighting, no controls, no animation
+   * and one fixed camera angle, so the same data always renders the same picture.
+   */
+  enableCaptureMode() {
+    this.frozen = true;
+    this.fixedAzimuth = CAPTURE_AZIMUTH;
+    this.viewPadding = CAPTURE_PADDING;
+    this.setInteractive(false);
+    this.controls.autoRotate = false;
+    this.intro = null;
+    this.setNight(false, { instant: true });
+    this.frozenRenders = 0;
+  }
+
+  /** Resolves after the next animation frame has been processed (and rendered, if needed). */
+  nextFrame() {
+    return new Promise((resolve) => this.frameWaiters.push(resolve));
   }
 
   /** Restarts the growth animation of the current garden. */
@@ -897,6 +932,7 @@ export class Garden {
     this.size = { width, height };
     this.renderer.setSize(width, height);
     this.camera.aspect = width / height;
+    this.frozenRenders = 0; // resizing clears the canvas
     if (this.garden && !this.userMovedCamera) this.fitView({ keepAzimuth: true });
     else this._applyViewOffset();
   }
@@ -909,7 +945,9 @@ export class Garden {
     const target = new THREE.Vector3(0, 0, 0);
     const points = this._framingPoints(g);
     let best = null;
-    if (keepAzimuth) {
+    if (this.fixedAzimuth !== null) {
+      best = { az: this.fixedAzimuth, dist: this._fitDistance(points, target, this.fixedAzimuth) };
+    } else if (keepAzimuth) {
       const az = this._currentAzimuth();
       best = { az, dist: this._fitDistance(points, target, az) };
     } else {
@@ -928,6 +966,7 @@ export class Garden {
     this.fitDistance = best.dist;
     this.fitAzimuth = best.az;
     this.userMovedCamera = false;
+    this.frozenRenders = 0;
   }
 
   /** Renders a clean frame and returns it as a PNG blob, with an optional caption. */
@@ -1067,6 +1106,18 @@ export class Garden {
 
   _frame(timestamp) {
     this.timer.update(timestamp);
+
+    if (this.frozen) {
+      // Capture mode: nothing moves, so only render after something changed.
+      if (this.frozenRenders < 2) {
+        this._updateFog();
+        this.renderer.render(this.scene, this.camera);
+        this.frozenRenders++;
+      }
+      this._flushFrameWaiters();
+      return;
+    }
+
     const rawDt = this.timer.getDelta();
     const dt = Math.min(rawDt, 0.1); // for physics-ish motion; fades use real time
     const t = this.timer.getElapsed();
@@ -1088,13 +1139,7 @@ export class Garden {
       }
     }
     if (g?.fireflies) this._updateFireflies(g, t);
-
-    for (const cloud of this.clouds) {
-      const d = cloud.userData;
-      d.angle += d.speed * dt;
-      cloud.position.set(Math.cos(d.angle) * d.rx, d.y + Math.sin(t * 0.4 + d.bob) * 0.25, Math.sin(d.angle) * d.rz);
-      cloud.rotation.y = -d.angle;
-    }
+    this._updateClouds(t, dt);
 
     if (this.marker.visible) this.marker.material.opacity = 0.65 + Math.sin(t * 5) * 0.25;
 
@@ -1107,10 +1152,7 @@ export class Garden {
     this.controls.update(dt);
     this._clampTarget();
     this.stars.position.copy(this.camera.position);
-
-    const dist = this.camera.position.distanceTo(this.controls.target);
-    this.scene.fog.near = dist * 0.9 + 10;
-    this.scene.fog.far = dist * 3 + 60;
+    this._updateFog();
 
     if (this.pickPending && this.interactive && !this.dragging) {
       this.pickPending = false;
@@ -1120,6 +1162,29 @@ export class Garden {
     this._emitTooltip();
 
     this.renderer.render(this.scene, this.camera);
+    this._flushFrameWaiters();
+  }
+
+  _flushFrameWaiters() {
+    if (this.frameWaiters.length === 0) return;
+    const waiters = this.frameWaiters;
+    this.frameWaiters = [];
+    for (const resolve of waiters) resolve();
+  }
+
+  _updateFog() {
+    const dist = this.camera.position.distanceTo(this.controls.target);
+    this.scene.fog.near = dist * 0.9 + 10;
+    this.scene.fog.far = dist * 3 + 60;
+  }
+
+  _updateClouds(t, dt) {
+    for (const cloud of this.clouds) {
+      const d = cloud.userData;
+      d.angle += d.speed * dt;
+      cloud.position.set(Math.cos(d.angle) * d.rx, d.y + Math.sin(t * 0.4 + d.bob) * 0.25, Math.sin(d.angle) * d.rz);
+      cloud.rotation.y = -d.angle;
+    }
   }
 
   _updateGrowth(g, local) {
@@ -1255,10 +1320,10 @@ export class Garden {
     const { width, height } = this.size;
     const ins = this.insets;
     return {
-      left: ((ins.left + VIEW_PADDING) / width) * 2 - 1,
-      right: 1 - ((ins.right + VIEW_PADDING) / width) * 2,
-      bottom: ((ins.bottom + VIEW_PADDING) / height) * 2 - 1,
-      top: 1 - ((ins.top + VIEW_PADDING) / height) * 2,
+      left: ((ins.left + this.viewPadding) / width) * 2 - 1,
+      right: 1 - ((ins.right + this.viewPadding) / width) * 2,
+      bottom: ((ins.bottom + this.viewPadding) / height) * 2 - 1,
+      top: 1 - ((ins.top + this.viewPadding) / height) * 2,
     };
   }
 

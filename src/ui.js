@@ -55,6 +55,7 @@ export function createUI() {
     tooltipCount: $('tooltip-count'),
     tooltipDate: $('tooltip-date'),
     toast: $('toast'),
+    captureOverlay: $('capture-overlay'),
   };
 
   const hud = [el.topbar, el.stats, el.toolbar];
@@ -329,6 +330,27 @@ export function createUI() {
     node.setAttribute('aria-busy', String(busy));
   }
 
+  // ---- capture mode ------------------------------------------------------------
+
+  function enterCaptureMode() {
+    document.body.classList.add('capture-mode');
+    el.landing.classList.add('is-hidden');
+    el.landing.inert = true;
+    for (const node of hud) node.hidden = true;
+    hideTooltip();
+  }
+
+  function showCaptureOverlay(text) {
+    el.captureOverlay.textContent = text;
+    el.captureOverlay.hidden = false;
+  }
+
+  /** Bottom margin so the island is framed clear of the caption. */
+  function getCaptureInsets() {
+    const bottom = el.captureOverlay.hidden ? 0 : window.innerHeight - el.captureOverlay.getBoundingClientRect().top;
+    return { top: 0, right: 0, bottom, left: 0 };
+  }
+
   function showFatal(message) {
     showLanding({ focus: false });
     el.form.hidden = true;
@@ -356,5 +378,8 @@ export function createUI() {
     downloadBlob,
     setBusy,
     showFatal,
+    enterCaptureMode,
+    showCaptureOverlay,
+    getCaptureInsets,
   };
 }
