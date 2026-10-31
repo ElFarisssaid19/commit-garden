@@ -4,10 +4,7 @@ Turn any GitHub contribution graph into a tiny 3D low-poly garden. Every day of 
 
 **Live demo: [elfarisssaid19.github.io/commit-garden](https://elfarisssaid19.github.io/commit-garden/)**
 
-<!-- GIF placeholder: record the grow animation and save it as docs/demo.gif -->
-![Commit Garden demo](docs/demo.gif)
-
-> 📽️ _Demo GIF coming soon._
+![Commit Garden demo: torvalds' contribution year growing into a garden](docs/demo.gif)
 
 ## Features
 
@@ -25,6 +22,7 @@ Turn any GitHub contribution graph into a tiny 3D low-poly garden. Every day of 
   - **Download PNG** saves a captioned screenshot.
 - **Demo garden**: random, offline-friendly data if you just want to look around. Demo links (`?demo=<seed>`) reproduce the same garden.
 - **Responsive**: works with mouse, trackpad and touch, from phones to wide screens.
+- **Capture mode**: `?user=octocat&capture=1` renders a still, deterministic garden with a caption, made for automated screenshots (see below).
 
 ### What grows where
 
@@ -48,7 +46,7 @@ Turn any GitHub contribution graph into a tiny 3D low-poly garden. Every day of 
 
 ## Run it locally
 
-You need Node.js **20.19+** (or 22.12+).
+You need Node.js **22.12+** (CI uses Node 22).
 
 ```bash
 npm ci            # install dependencies from package-lock.json
@@ -58,6 +56,25 @@ npm run preview   # serve ./dist locally (vite preview --base ./)
 ```
 
 Open `http://localhost:5173/?user=octocat` to load a garden straight from the URL.
+
+### Regenerating the demo GIF
+
+```bash
+npm run demo:gif                    # builds, records ?user=torvalds, writes docs/demo.gif
+DEMO_USER=octocat npm run demo:gif  # record someone else
+```
+
+This needs a local Chrome or Chromium (set `CHROME_PATH` if it isn't found automatically) and `ffmpeg`. The script ([`scripts/make-demo-gif.mjs`](scripts/make-demo-gif.mjs)) serves the build, drives it with headless Chrome on a virtual clock and captures 6 s at 15 fps. ffmpeg then encodes an 800 px wide, looping GIF under 5 MB.
+
+## Capture mode
+
+`?user=<name>&capture=1` is meant for screenshot bots, for example a GitHub Action that keeps a garden image on your profile up to date:
+
+- The landing screen and all controls are skipped. Only the garden and a caption remain: `🌱 <name> · <total> contributions · <rank>`.
+- The page is always in day mode, with one fixed camera angle sized for a 1200×630 viewport. There's no grow animation and nothing moves.
+- When the scene is fully rendered the page sets `window.__GARDEN_READY__ = true`. If loading fails it sets `window.__GARDEN_ERROR__` to the error message instead.
+
+The garden layout is seeded from the username, so the same contribution data always produces the same image. `?demo=<seed>&capture=1` works too, without any network.
 
 ## Project structure
 
@@ -69,6 +86,8 @@ src/garden.js           Three.js scene, procedural plants, animation, picking
 src/ui.js               DOM: landing, stats panel, tooltip, toasts, clipboard/download
 src/style.css           Styles (day and night themes)
 public/favicon.svg      Favicon
+scripts/                make-demo-gif.mjs (records docs/demo.gif)
+docs/demo.gif           Demo animation used in this README
 .github/workflows/      GitHub Pages deployment
 ```
 
@@ -78,7 +97,7 @@ Built with [Vite](https://vite.dev) and [three.js](https://threejs.org), in vani
 
 The site is a static build deployed to **GitHub Pages** by GitHub Actions ([`.github/workflows/deploy.yml`](.github/workflows/deploy.yml)):
 
-1. Every push to `main` (or a manual **Run workflow**) starts the **build** job. It checks out the repo, sets up Node 20 with the npm cache, runs `npm ci` and `npm run build`, then uploads `./dist` as the Pages artifact.
+1. Every push to `main` (or a manual **Run workflow**) starts the **build** job. It checks out the repo, sets up Node 22 with the npm cache, runs `npm ci` and `npm run build`, then uploads `./dist` as the Pages artifact.
 2. The **deploy** job publishes that artifact to the `github-pages` environment with `actions/deploy-pages`.
 
 **One-time setup:** in the repository go to **Settings → Pages → Build and deployment → Source** and choose **GitHub Actions**.
