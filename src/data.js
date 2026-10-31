@@ -13,7 +13,7 @@ const USERNAME_RE = /^[a-z\d](?:[a-z\d]|-(?=[a-z\d])){0,38}$/i;
 export class GardenError extends Error {
   /**
    * @param {string} message Friendly, user-facing message.
-   * @param {'invalid'|'not-found'|'network'|'timeout'|'server'|'data'|'aborted'} kind
+   * @param {'invalid'|'not-found'|'network'|'timeout'|'rate-limit'|'server'|'data'|'aborted'} kind
    */
   constructor(message, kind) {
     super(message);
@@ -31,7 +31,7 @@ export function normalizeUsername(input) {
     .split(/[/?#\s]/)[0];
 }
 
-export function isValidUsername(name) {
+function isValidUsername(name) {
   return USERNAME_RE.test(name);
 }
 
@@ -47,7 +47,10 @@ export async function fetchContributions(username, { signal } = {}) {
     );
   }
 
-  // Combine the caller's abort signal with a request timeout.
+  if (signal?.aborted) throw new GardenError('Request cancelled.', 'aborted');
+
+  // Combine the caller's abort signal with a request timeout. The timeout covers
+  // reading the body too, not just waiting for the response headers.
   const controller = new AbortController();
   let timedOut = false;
   const timer = setTimeout(() => {
@@ -57,47 +60,65 @@ export async function fetchContributions(username, { signal } = {}) {
   const onAbort = () => controller.abort();
   signal?.addEventListener('abort', onAbort, { once: true });
 
-  let response;
-  try {
-    response = await fetch(`${API_BASE}${encodeURIComponent(username)}?y=last`, {
-      signal: controller.signal,
-      headers: { Accept: 'application/json' },
-    });
-  } catch (err) {
+  /** Maps an abort (ours or the caller's) to a GardenError, or returns null for other errors. */
+  const abortError = (err) => {
     if (timedOut) {
-      throw new GardenError('The contributions API took too long to answer. Please try again in a moment.', 'timeout');
+      return new GardenError('The contributions API took too long to answer. Please try again in a moment.', 'timeout');
     }
-    if (err?.name === 'AbortError') throw new GardenError('Request cancelled.', 'aborted');
-    throw new GardenError(
-      'Couldn’t reach the contributions API. Check your connection — or try the demo garden, it works offline.',
-      'network',
-    );
+    return err?.name === 'AbortError' ? new GardenError('Request cancelled.', 'aborted') : null;
+  };
+
+  try {
+    let response;
+    try {
+      response = await fetch(`${API_BASE}${encodeURIComponent(username)}?y=last`, {
+        signal: controller.signal,
+        headers: { Accept: 'application/json' },
+      });
+    } catch (err) {
+      throw (
+        abortError(err) ??
+        new GardenError('Couldn’t reach the contributions API. Check your connection — or try the demo garden, it works offline.', 'network')
+      );
+    }
+
+    if (response.status === 404) {
+      throw new GardenError(
+        `We couldn’t find a GitHub user called “${username}”. Check the spelling and try again. (Organization accounts don’t have a contribution graph, so they can’t grow a garden.)`,
+        'not-found',
+      );
+    }
+    if (response.status === 429) {
+      throw new GardenError('The contributions API is getting too many requests right now. Wait a minute and try again.', 'rate-limit');
+    }
+    if (response.status >= 500) {
+      throw new GardenError(
+        `The contributions API is having trouble right now (HTTP ${response.status}). Please try again in a moment.`,
+        'server',
+      );
+    }
+    if (!response.ok) {
+      throw new GardenError(
+        `The contributions API returned an error (HTTP ${response.status}). Please try again in a moment.`,
+        'server',
+      );
+    }
+
+    let json;
+    try {
+      json = await response.json();
+    } catch (err) {
+      throw abortError(err) ?? new GardenError('The contributions API sent back something unexpected. Please try again.', 'data');
+    }
+    if (!json || !Array.isArray(json.contributions) || json.contributions.length === 0) {
+      throw new GardenError('The contributions API sent back something unexpected. Please try again.', 'data');
+    }
+
+    return layoutGarden(json.contributions, { username, isDemo: false });
   } finally {
     clearTimeout(timer);
     signal?.removeEventListener('abort', onAbort);
   }
-
-  if (response.status === 404) {
-    throw new GardenError(`We couldn’t find a GitHub user called “${username}”. Check the spelling and try again.`, 'not-found');
-  }
-  if (!response.ok) {
-    throw new GardenError(
-      `The contributions API returned an error (HTTP ${response.status}). Please try again in a moment.`,
-      'server',
-    );
-  }
-
-  let json;
-  try {
-    json = await response.json();
-  } catch {
-    throw new GardenError('The contributions API sent back something unexpected. Please try again.', 'data');
-  }
-  if (!json || !Array.isArray(json.contributions) || json.contributions.length === 0) {
-    throw new GardenError('The contributions API sent back something unexpected. Please try again.', 'data');
-  }
-
-  return layoutGarden(json.contributions, { username, isDemo: false });
 }
 
 /**
@@ -153,13 +174,18 @@ export function layoutGarden(rawDays, { username = null, isDemo = false, seed } 
   };
 }
 
-/** Random-but-plausible contribution data for the demo garden (no network needed). */
-export function generateDemoData(seed = Math.floor(Math.random() * 2 ** 31)) {
-  const rand = createRandom(seed);
+/** Today (UTC midnight) and the Sunday on or before one year ago, like GitHub's graph. */
+function lastYearRange() {
   const now = new Date();
   const end = Date.UTC(now.getFullYear(), now.getMonth(), now.getDate());
   const yearAgo = end - 365 * DAY_MS;
-  const start = yearAgo - new Date(yearAgo).getUTCDay() * DAY_MS;
+  return { start: yearAgo - new Date(yearAgo).getUTCDay() * DAY_MS, end };
+}
+
+/** Random-but-plausible contribution data for the demo garden (no network needed). */
+export function generateDemoData(seed = Math.floor(Math.random() * 2 ** 31)) {
+  const rand = createRandom(seed);
+  const { start, end } = lastYearRange();
 
   // Weekly "energy" follows a smoothed random walk with the odd vacation.
   let energy = 0.35 + rand() * 0.4;
@@ -194,10 +220,7 @@ export function generateDemoData(seed = Math.floor(Math.random() * 2 ** 31)) {
 
 /** Empty garden (all bare dirt) shown behind the landing screen. */
 export function generateEmptyGarden() {
-  const now = new Date();
-  const end = Date.UTC(now.getFullYear(), now.getMonth(), now.getDate());
-  const yearAgo = end - 365 * DAY_MS;
-  const start = yearAgo - new Date(yearAgo).getUTCDay() * DAY_MS;
+  const { start, end } = lastYearRange();
   const raw = [];
   for (let t = start; t <= end; t += DAY_MS) {
     raw.push({ date: new Date(t).toISOString().slice(0, 10), count: 0, level: 0 });
@@ -239,7 +262,7 @@ export function computeStats(days) {
   };
 }
 
-export const RANKS = [
+const RANKS = [
   { name: 'Desert', emoji: '🏜️', min: 0, blurb: 'A few hardy seeds are waiting for rain.' },
   { name: 'Oasis', emoji: '🌴', min: 100, blurb: 'Life is gathering around the water.' },
   { name: 'Meadow', emoji: '🌼', min: 400, blurb: 'Wildflowers as far as the eye can see.' },
